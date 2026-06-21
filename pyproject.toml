@@ -1,0 +1,19 @@
+[project]
+name = "power-monitor"
+version = "0.1.0"
+description = "Windows 11 desktop power monitor using LibreHardwareMonitorLib and Tkinter."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pythonnet>=3.0.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pyinstaller>=6.0.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
