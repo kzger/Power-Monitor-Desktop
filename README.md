@@ -174,6 +174,26 @@ vendor\*.dll
 inside the bundled executable extraction directory, so the app can find
 LibreHardwareMonitor and its dependency assemblies when running as an exe.
 
+## Packages And Licenses
+
+This project uses these main packages:
+
+- `pythonnet` and `clr-loader` to load .NET assemblies from Python. Both are
+  MIT licensed.
+- `LibreHardwareMonitorLib.dll` from LibreHardwareMonitor to read hardware
+  sensors. LibreHardwareMonitorLib is MPL-2.0 licensed.
+- `PyInstaller` to build the Windows executable. PyInstaller is GPL-2.0-or-later
+  with its bootloader exception that allows distributing generated applications.
+- `pytest` for development tests. pytest is MIT licensed.
+
+The `vendor/` directory also includes LibreHardwareMonitor release companion
+assemblies. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the
+third-party package list, license names, and source links.
+
+This repository does not currently declare a project-level license for the
+application code itself. Third-party components remain governed by their own
+upstream licenses.
+
 ## Install Startup Task
 
 Build the exe first, then run PowerShell as Administrator:
