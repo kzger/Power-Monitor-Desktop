@@ -25,6 +25,7 @@ power-monitor/
     main.py
     power_reader.py
     config.py
+    startup_task.py
   vendor/
     LibreHardwareMonitorLib.dll
     README.md
@@ -33,6 +34,8 @@ power-monitor/
     uninstall_startup_task.ps1
     build.ps1
   tests/
+    test_config.py
+    test_main_window_settings.py
     test_power_reader.py
   pyproject.toml
   requirements.txt
@@ -131,11 +134,28 @@ Controls:
 - Use the mouse wheel over the wattage to change only the wattage font size.
 - Press `+` / `-` to change only the wattage font size.
 - Use `Watt text color` in Full menu view to change the overlay wattage color.
+- Use `Start at Windows logon` in Full menu view to install or remove the
+  Task Scheduler startup task.
 - Right-click the wattage for full menu, size controls, and Exit.
 - Press `Esc` to close the app.
 
 The app may need to run as Administrator for LibreHardwareMonitor to access all
 hardware sensors.
+
+## Saved Settings
+
+User settings are saved automatically when you change controls or close the app.
+The next launch restores the same display mode, baseline, always-on-top setting,
+watt font size, and watt text color.
+
+The settings file is stored in:
+
+```text
+%APPDATA%\PowerMonitorDesktop\settings.json
+```
+
+The `POWER_MONITOR_BASELINE_WATTS` environment variable still overrides the
+saved baseline for that launch only.
 
 ## Run Tests
 
@@ -212,6 +232,13 @@ PowerMonitorDesktop
 The task starts `dist\power-monitor.exe` when the current user logs on and uses
 highest privileges. This is preferred for a GUI desktop app because it runs in
 the user session where the window can be displayed.
+
+You can also enable or disable the same task from the app's Full menu view with
+`Start at Windows logon`. This option still requires `dist\power-monitor.exe` to
+exist first. The app runs the Task Scheduler registration in the background and
+hides the PowerShell helper window, so the desktop UI should remain responsive.
+Windows may still require Administrator permissions because the task uses
+highest privileges.
 
 ## Remove Startup Task
 

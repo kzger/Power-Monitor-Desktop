@@ -1,4 +1,5 @@
 from app.config import AppConfig
+from app import main as main_module
 from app.main import (
     PowerMonitorApp,
     clamp_font_size,
@@ -26,9 +27,9 @@ def test_overlay_settings_are_high_contrast_and_transparent() -> None:
 def test_panel_settings_restore_full_control_menu_size() -> None:
     settings = panel_settings()
 
-    assert settings.geometry == "380x430"
+    assert settings.geometry == "400x480"
     assert settings.min_width == 340
-    assert settings.min_height == 400
+    assert settings.min_height == 450
 
 
 def test_overlay_window_size_scales_with_watt_text_and_font_size() -> None:
@@ -64,6 +65,33 @@ def test_scheduled_refresh_reads_power_on_each_tick() -> None:
     assert root.callback == app._schedule_refresh
 
 
+def test_startup_task_status_check_keeps_checkbox_selectable(monkeypatch) -> None:
+    root = FakeRoot()
+    app = PowerMonitorApp.__new__(PowerMonitorApp)
+    app.root = root
+    app._closed = False
+    app._startup_task_busy = False
+    app.startup_enabled_var = FakeVar(False)
+    app.status_var = FakeVar("")
+    app.startup_task_checkbutton = FakeCheckbutton()
+
+    class ImmediateThread:
+        def __init__(self, target, daemon):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(main_module, "is_startup_task_installed", lambda: True)
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+
+    app._check_startup_task_async()
+
+    assert app.startup_enabled_var.get() is True
+    assert app.startup_task_checkbutton.state == "normal"
+
+
 class FakeRoot:
     def __init__(self) -> None:
         self.delay_ms: int | None = None
@@ -72,4 +100,25 @@ class FakeRoot:
     def after(self, delay_ms: int, callback):
         self.delay_ms = delay_ms
         self.callback = callback
+        if delay_ms == 0:
+            callback()
         return "after-id"
+
+
+class FakeVar:
+    def __init__(self, value):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value) -> None:
+        self.value = value
+
+
+class FakeCheckbutton:
+    def __init__(self) -> None:
+        self.state = "normal"
+
+    def configure(self, **kwargs) -> None:
+        self.state = kwargs.get("state", self.state)

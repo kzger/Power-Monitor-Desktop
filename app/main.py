@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import threading
 import tkinter as tk
 from tkinter import ttk
 
-from app.config import APP_NAME, AppConfig, load_config_from_env
+from app.config import APP_NAME, AppConfig, load_config_from_env, save_config
 from app.power_reader import LibreHardwareMonitorReader, PowerSummary
+from app.startup_task import is_startup_task_installed, set_startup_task_enabled
 
 
 @dataclass(frozen=True)
@@ -50,9 +52,9 @@ def overlay_settings() -> OverlaySettings:
 
 def panel_settings() -> PanelSettings:
     return PanelSettings(
-        geometry="380x430",
+        geometry="400x480",
         min_width=340,
-        min_height=400,
+        min_height=450,
     )
 
 
@@ -81,7 +83,9 @@ class PowerMonitorApp:
         self._after_id: str | None = None
         self._drag_start_x = 0
         self._drag_start_y = 0
-        self._display_mode = "overlay"
+        self._display_mode = config.display_mode
+        self._startup_task_busy = False
+        self._closed = False
 
         self.total_var = tk.StringVar(value="-- W")
         self.cpu_var = tk.StringVar(value="-- W")
@@ -90,23 +94,29 @@ class PowerMonitorApp:
         self.sensor_count_var = tk.StringVar(value="Sensors: --")
         self.status_var = tk.StringVar(value="Starting...")
         self.baseline_var = tk.DoubleVar(value=config.baseline_watts)
-        self.font_size_var = tk.IntVar(value=self.settings.default_font_size)
-        self.text_color_name_var = tk.StringVar(value="White")
-        self.always_on_top_var = tk.BooleanVar(value=self.settings.always_on_top)
+        self.font_size_var = tk.IntVar(
+            value=clamp_font_size(config.watt_font_size, self.settings)
+        )
+        self.text_color_name_var = tk.StringVar(
+            value=self._valid_text_color_name(config.text_color_name)
+        )
+        self.always_on_top_var = tk.BooleanVar(value=config.always_on_top)
+        self.startup_enabled_var = tk.BooleanVar(value=False)
 
         self._configure_window()
         self._configure_styles()
         self._build_overlay()
         self._build_panel()
         self._bind_interactions()
-        self._apply_display_mode("overlay")
+        self.root.after(100, self._check_startup_task_async)
+        self._apply_display_mode(config.display_mode, save=False)
         self._schedule_refresh(initial=True)
 
     def _configure_window(self) -> None:
         self.root.title(APP_NAME)
         self.root.overrideredirect(True)
         self.root.configure(background=self.settings.transparent_color)
-        self.root.attributes("-topmost", self.settings.always_on_top)
+        self.root.attributes("-topmost", self.always_on_top_var.get())
         try:
             self.root.attributes("-transparentcolor", self.settings.transparent_color)
         except tk.TclError:
@@ -178,11 +188,11 @@ class PowerMonitorApp:
             increment=1,
             textvariable=self.baseline_var,
             width=8,
-            command=self.refresh_now,
+            command=self._baseline_changed,
         )
         baseline.grid(row=5, column=1, sticky="e", pady=(12, 0))
-        baseline.bind("<Return>", lambda _event: self.refresh_now())
-        baseline.bind("<FocusOut>", lambda _event: self.refresh_now())
+        baseline.bind("<Return>", lambda _event: self._baseline_changed())
+        baseline.bind("<FocusOut>", lambda _event: self._baseline_changed())
 
         ttk.Label(panel, text="Watt font size", style="Muted.TLabel").grid(
             row=6,
@@ -228,19 +238,34 @@ class PowerMonitorApp:
         )
         always_on_top.grid(row=8, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
+        self.startup_task_checkbutton = ttk.Checkbutton(
+            panel,
+            text="Start at Windows logon",
+            variable=self.startup_enabled_var,
+            command=self._apply_startup_task,
+            style="App.TCheckbutton",
+        )
+        self.startup_task_checkbutton.grid(
+            row=9,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            pady=(6, 0),
+        )
+
         overlay_button = ttk.Button(
             panel,
             text="Overlay view",
             command=self.toggle_display_mode,
             style="App.TButton",
         )
-        overlay_button.grid(row=9, column=0, sticky="w", pady=(10, 0))
+        overlay_button.grid(row=10, column=0, sticky="w", pady=(10, 0))
 
         exit_button = ttk.Button(panel, text="Exit", command=self.close, style="App.TButton")
-        exit_button.grid(row=9, column=1, sticky="e", pady=(10, 0))
+        exit_button.grid(row=10, column=1, sticky="e", pady=(10, 0))
 
         ttk.Label(panel, textvariable=self.sensor_count_var, style="Muted.TLabel").grid(
-            row=10,
+            row=11,
             column=0,
             columnspan=2,
             sticky="w",
@@ -251,7 +276,7 @@ class PowerMonitorApp:
             textvariable=self.status_var,
             style="Status.TLabel",
             wraplength=320,
-        ).grid(row=11, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        ).grid(row=12, column=0, columnspan=2, sticky="ew", pady=(4, 0))
 
         self.panel_frame.columnconfigure(0, weight=1)
         self.panel_frame.rowconfigure(0, weight=1)
@@ -309,9 +334,9 @@ class PowerMonitorApp:
         self.menu.add_separator()
         self.menu.add_command(label="Exit", command=self.close)
 
-    def _apply_display_mode(self, mode: str) -> None:
-        self._display_mode = mode
-        if mode == "overlay":
+    def _apply_display_mode(self, mode: str, save: bool = True) -> None:
+        self._display_mode = mode if mode in {"overlay", "panel"} else "overlay"
+        if self._display_mode == "overlay":
             self.panel_frame.pack_forget()
             self.canvas.pack(fill="both", expand=True)
             self.root.overrideredirect(True)
@@ -320,7 +345,7 @@ class PowerMonitorApp:
                 self.root.attributes("-transparentcolor", self.settings.transparent_color)
             except tk.TclError:
                 pass
-            self._apply_always_on_top()
+            self._apply_always_on_top(save=False)
             self._redraw_wattage()
         else:
             self.canvas.pack_forget()
@@ -333,9 +358,11 @@ class PowerMonitorApp:
             self.panel_frame.pack(fill="both", expand=True)
             self.root.geometry(self.panel_settings.geometry)
             self.root.minsize(self.panel_settings.min_width, self.panel_settings.min_height)
-            self._apply_always_on_top()
+            self._apply_always_on_top(save=False)
             self._update_panel_font()
             self.root.update_idletasks()
+        if save:
+            self._save_current_config()
 
     def toggle_display_mode(self) -> None:
         next_mode = "panel" if self._display_mode == "overlay" else "overlay"
@@ -345,8 +372,10 @@ class PowerMonitorApp:
         self.toggle_display_mode()
         return "break"
 
-    def _apply_always_on_top(self) -> None:
+    def _apply_always_on_top(self, save: bool = True) -> None:
         self.root.attributes("-topmost", self.always_on_top_var.get())
+        if save:
+            self._save_current_config()
 
     def _schedule_refresh(self, initial: bool = False) -> None:
         self.refresh_now()
@@ -358,6 +387,10 @@ class PowerMonitorApp:
     def refresh_now(self) -> None:
         summary = self.reader.read_summary(self._baseline_value())
         self._render_summary(summary)
+
+    def _baseline_changed(self) -> None:
+        self.refresh_now()
+        self._save_current_config()
 
     def _baseline_value(self) -> float:
         try:
@@ -387,6 +420,7 @@ class PowerMonitorApp:
             self._redraw_wattage()
         else:
             self._update_panel_font()
+        self._save_current_config()
 
     def reset_font_size(self) -> None:
         self.font_size_var.set(self.settings.default_font_size)
@@ -394,6 +428,7 @@ class PowerMonitorApp:
             self._redraw_wattage()
         else:
             self._update_panel_font()
+        self._save_current_config()
 
     def _apply_font_size_from_control(self) -> None:
         try:
@@ -405,10 +440,12 @@ class PowerMonitorApp:
             self._redraw_wattage()
         else:
             self._update_panel_font()
+        self._save_current_config()
 
     def _apply_text_color(self) -> None:
         if self._display_mode == "overlay":
             self._redraw_wattage()
+        self._save_current_config()
 
     def _update_panel_font(self) -> None:
         panel_size = min(40, max(24, self.font_size_var.get()))
@@ -459,6 +496,113 @@ class PowerMonitorApp:
         color_by_name = dict(self.settings.text_colors)
         return color_by_name.get(self.text_color_name_var.get(), self.settings.text_fill)
 
+    def _valid_text_color_name(self, color_name: str) -> str:
+        valid_names = {name for name, _color in self.settings.text_colors}
+        return color_name if color_name in valid_names else "White"
+
+    def _sync_startup_task_state(self) -> None:
+        try:
+            self.startup_enabled_var.set(is_startup_task_installed())
+        except Exception as exc:
+            self.startup_enabled_var.set(False)
+            self.status_var.set(f"Could not check startup task: {exc}")
+
+    def _check_startup_task_async(self) -> None:
+        def worker() -> None:
+            error: Exception | None = None
+            enabled = False
+            try:
+                enabled = is_startup_task_installed()
+            except Exception as exc:
+                error = exc
+            self._run_on_ui_thread(
+                lambda: self._finish_startup_task_check(enabled, error)
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_startup_task_check(
+        self,
+        enabled: bool,
+        error: Exception | None,
+    ) -> None:
+        if self._startup_task_busy:
+            return
+        if error is not None:
+            self.status_var.set(f"Could not check startup task: {error}")
+            return
+        self.startup_enabled_var.set(enabled)
+
+    def _apply_startup_task(self) -> None:
+        if self._startup_task_busy:
+            return
+
+        requested = self.startup_enabled_var.get()
+        self._set_startup_task_busy(True)
+        action = "Enabling" if requested else "Disabling"
+        self.status_var.set(f"{action} startup task...")
+
+        def worker() -> None:
+            error: Exception | None = None
+            enabled = False
+            try:
+                set_startup_task_enabled(requested)
+                enabled = is_startup_task_installed()
+            except Exception as exc:
+                error = exc
+                try:
+                    enabled = is_startup_task_installed()
+                except Exception:
+                    enabled = not requested
+            self._run_on_ui_thread(
+                lambda: self._finish_startup_task_change(enabled, error)
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_startup_task_change(
+        self,
+        enabled: bool,
+        error: Exception | None,
+    ) -> None:
+        self._set_startup_task_busy(False)
+        self.startup_enabled_var.set(enabled)
+        if error is not None:
+            self.status_var.set(f"Startup task change failed: {error}")
+            return
+        state = "enabled" if enabled else "disabled"
+        self.status_var.set(f"Startup task {state}.")
+
+    def _set_startup_task_busy(self, busy: bool) -> None:
+        self._startup_task_busy = busy
+        if hasattr(self, "startup_task_checkbutton"):
+            self.startup_task_checkbutton.configure(
+                state="disabled" if busy else "normal"
+            )
+
+    def _run_on_ui_thread(self, callback) -> None:
+        if self._closed:
+            return
+        try:
+            self.root.after(0, callback)
+        except tk.TclError:
+            pass
+
+    def _save_current_config(self) -> None:
+        config = AppConfig(
+            baseline_watts=self._baseline_value(),
+            update_interval_ms=self.config.update_interval_ms,
+            always_on_top=self.always_on_top_var.get(),
+            display_mode=self._display_mode,
+            watt_font_size=self.font_size_var.get(),
+            text_color_name=self.text_color_name_var.get(),
+        )
+        try:
+            save_config(config)
+            self.config = config
+        except Exception as exc:
+            self.status_var.set(f"Could not save settings: {exc}")
+
     def _start_drag(self, event: tk.Event) -> None:
         self._drag_start_x = event.x
         self._drag_start_y = event.y
@@ -476,6 +620,8 @@ class PowerMonitorApp:
         self.menu.tk_popup(event.x_root, event.y_root)
 
     def close(self) -> None:
+        self._closed = True
+        self._save_current_config()
         if self._after_id is not None:
             self.root.after_cancel(self._after_id)
             self._after_id = None
